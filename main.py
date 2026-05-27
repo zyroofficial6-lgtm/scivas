@@ -2,7 +2,6 @@ import httpx
 from bs4 import BeautifulSoup
 import re
 from datetime import datetime
-from gtts import gTTS
 import time
 import threading
 import json
@@ -2086,24 +2085,6 @@ def listen_command():
             print(f"Loop listener error: {e}")
             time.sleep(5)
 
-def send_audio_otp(otp, clean_sms, msg, target_ids=None):
-    try:
-        angka_map = {"0": "nol", "1": "satu", "2": "dua", "3": "tiga", "4": "empat", "5": "lima", "6": "enam", "7": "tujuh", "8": "delapan", "9": "sembilan"}
-        result = ["strip" if c == "-" else angka_map.get(c, c) for c in otp]
-        text = "Kode verifikasi WhatsApp anda adalah " + " ".join(result)
-
-        tts = gTTS(text=text, lang="id")
-        filename = "voice/MyAudioOtp.mp3"
-        os.makedirs("voice", exist_ok=True)
-        tts.save(filename)
-
-        url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendAudio"
-
-        for gid in (target_ids or []):
-            with open(filename, "rb") as f:
-                requests.post(url, data={"chat_id": gid, "caption": msg, "parse_mode": "HTML"}, files={"audio": f})
-    except Exception as e:
-        print("ERROR AUDIO:", e)
             
 # ================= BOT LOOP =================
 def run_bot():
