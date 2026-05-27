@@ -49,7 +49,7 @@ RETURN_NUMBER_URL = f"{BASE}/portal/numbers/return/number"
 RETURN_ALL_URL = f"{BASE}/portal/numbers/return/allnumber/bluck"
 EXPORT_URL = f"{BASE}/portal/numbers/export"
 
-BOT_TOKEN = "8972596901:AAEZueI_bs2Z4CIfaTEhk01ibTj-wrOFcFE"
+BOT_TOKEN = "8134173482:AAGHVHETip-dzRTrbPwvpiYPqX89p3N7rSc"
 GROUPS_FILE = "groups.json"
 ADDNUM_API_URL = "https://ws.websocket.web.id/admin/addnumber"
 ADDNUM_API_KEY = "112231"
