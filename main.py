@@ -152,12 +152,16 @@ def save_cookies(cookies_dict):
 def load_groups():
     if not os.path.exists(GROUPS_FILE):
         with open(GROUPS_FILE, "w") as f:
-            json.dump({"groups": []}, f)
+            json.dump({}, f)
     try:
         with open(GROUPS_FILE, "r") as f:
-            return json.load(f).get("groups", [])
+            data = json.load(f)
+        # Backward compat: format lama {"groups": [...]} → convert ke dict kosong
+        if isinstance(data, list) or "groups" in data:
+            return {}
+        return data
     except:
-        return []
+        return {}
 
 def load_users():
     if not os.path.exists(USERS_FILE):
@@ -191,9 +195,54 @@ def save_users(data):
 
 def save_groups():
     with open(GROUPS_FILE, "w") as f:
-        json.dump({"groups": groups}, f, indent=2)
+        json.dump(user_groups, f, indent=2)
 
-groups = load_groups()
+user_groups = load_groups()
+
+# ===== PER-USER GROUP HELPERS =====
+def get_user_groups(user_id):
+    return user_groups.get(str(user_id), [])
+
+def add_user_group(user_id, gid):
+    uid = str(user_id)
+    if uid not in user_groups:
+        user_groups[uid] = []
+    if gid not in user_groups[uid]:
+        user_groups[uid].append(gid)
+    save_groups()
+
+def remove_user_group(user_id, gid):
+    uid = str(user_id)
+    if uid in user_groups and gid in user_groups[uid]:
+        user_groups[uid].remove(gid)
+        save_groups()
+        return True
+    return False
+
+# ===== USER KEY (IDENTITY) =====
+def generate_user_key(user_id):
+    raw = f"KICEN-{user_id}-IVAS-SECRET"
+    h = hashlib.md5(raw.encode()).hexdigest()[:8].upper()
+    return f"KX-{h[:4]}-{h[4:]}"
+
+def get_or_create_user_key(user_id):
+    if user_id == OWNER_ID:
+        return generate_user_key(user_id)
+    users = load_users()
+    uid = str(user_id)
+    changed = False
+    if uid not in users:
+        users[uid] = {"emails": [], "key": generate_user_key(user_id)}
+        changed = True
+    elif "key" not in users.get(uid, {}):
+        users[uid]["key"] = generate_user_key(user_id)
+        changed = True
+    if changed:
+        save_users(users)
+    return users[uid]["key"]
+
+# ===== PREMIUM ACCOUNT SESSION CACHE =====
+_premium_acc_cache = {}  # email -> acc dict (persistent session untuk premium user)
 
 def load_sent_cache():
     os.makedirs("file", exist_ok=True)
@@ -490,8 +539,19 @@ def send_msg(chat_id, text):
     requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage", data={"chat_id": chat_id, "text": text, "parse_mode": "HTML"}) 
     
 def cek_premium(chat_id, user_id):
+    user_key = get_or_create_user_key(user_id)
+    my_groups = get_user_groups(user_id)
+    grup_status = f"{len(my_groups)} grup" if my_groups else "Belum addgrup (PM aktif)"
     if user_id == OWNER_ID:
-        return send_msg(chat_id, "  <b>STATUS PREMIUM</b>\n\n  OWNER MODE\n   Unlimited Access\n  Tanpa Limit")
+        return send_msg(chat_id,
+            f"  <b>STATUS PREMIUM</b>\n\n"
+            f"<blockquote>"
+            f"👑 Mode     : OWNER\n"
+            f"🔑 Key      : <code>{user_key}</code>\n"
+            f"♾️ Akses    : Unlimited\n"
+            f"💬 Grup     : {grup_status}"
+            f"</blockquote>"
+        )
     user = premium_users.get(str(user_id))
     if not user: return send_msg(chat_id, "  Kamu bukan user premium")
     if time.time() > user["expired"]:
@@ -501,8 +561,16 @@ def cek_premium(chat_id, user_id):
     reset_limit_if_needed(user_id)
     sisa_detik = int(user["expired"] - time.time())
     sisa_hari = max(0, sisa_detik // 86400)
-    msg = f"  <b>STATUS PREMIUM</b>\n\n  Sisa Hari : {sisa_hari} hari\n  Limit     : {user['used']}/{user['limit']}\n  Reset     : Setiap hari\n"
-    send_msg(chat_id, msg)
+    send_msg(chat_id,
+        f"  <b>STATUS PREMIUM</b>\n\n"
+        f"<blockquote>"
+        f"🌟 Mode     : PREMIUM\n"
+        f"🔑 Key      : <code>{user_key}</code>\n"
+        f"📅 Sisa     : {sisa_hari} hari\n"
+        f"📊 Limit    : {user['used']}/{user['limit']} (reset harian)\n"
+        f"💬 Grup     : {grup_status}"
+        f"</blockquote>"
+    )
     
 def reset_limit_if_needed(user_id):
     today = datetime.now().strftime("%Y-%m-%d")
@@ -520,10 +588,12 @@ def handle_start(user_id, chat_id):
     THUMBNAIL_PATH = "./thumbnail.png"
 
     if owner or is_prem:
+        user_key = get_or_create_user_key(user_id)
         if owner:
             caption = (
                 "🤖 <b>BOT OTP IVAS V7</b>\n"
                 "<i>SMS/OTP monitoring — Platform IVAS</i>\n\n"
+                f"🔑 <b>KEY:</b> <code>{user_key}</code>\n\n"
                 "👑 <b>OWNER</b>\n"
                 "<blockquote>"
                 "/setcookie\n"
@@ -559,6 +629,7 @@ def handle_start(user_id, chat_id):
             caption = (
                 "🤖 <b>BOT OTP IVAS V7</b>\n"
                 "<i>SMS/OTP monitoring — Platform IVAS</i>\n\n"
+                f"🔑 <b>KEY:</b> <code>{user_key}</code>\n\n"
                 "🌟 <b>PREMIUM</b>\n"
                 "<blockquote>"
                 "/addcookie\n"
@@ -1935,26 +2006,25 @@ def listen_command():
                     elif text.startswith("/addgrup"):
                         if is_group:
                             gid = str(chat_id)
-                            if gid in groups: send_msg(chat_id, "  Grup sudah ada")
+                            if gid in get_user_groups(user_id):
+                                send_msg(chat_id, "  Grup sudah ada di akun kamu")
                             else:
-                                groups.append(gid)
-                                save_groups()
-                                send_msg(chat_id, f"  Grup ditambahkan:\n{gid}")
+                                add_user_group(user_id, gid)
+                                send_msg(chat_id, f"✅ <b>Grup berhasil ditambahkan!</b>\n\n<blockquote>🆔 ID: <code>{gid}</code>\n🔑 Key: <code>{get_or_create_user_key(user_id)}</code></blockquote>")
                         else: send_msg(chat_id, "  Jalankan di dalam grup!")
 
                     elif text.startswith("/delgrup"):
                         gid = str(chat_id)
-                        if gid in groups:
-                            groups.remove(gid)
-                            save_groups()
-                            send_msg(chat_id, f"  Grup dihapus:\n{gid}")
-                        else: send_msg(chat_id, "  Grup tidak ditemukan")
+                        if remove_user_group(user_id, gid):
+                            send_msg(chat_id, f"  Grup dihapus dari akun kamu:\n{gid}")
+                        else: send_msg(chat_id, "  Grup tidak ditemukan di akun kamu")
 
                     elif text.startswith("/listgrup"):
-                        if not groups: send_msg(chat_id, "Belum ada grup")
+                        my_groups = get_user_groups(user_id)
+                        if not my_groups: send_msg(chat_id, "Belum ada grup di akun kamu")
                         else:
-                            msg_out = "  <b>LIST GRUP</b>\n\n"
-                            for i, g in enumerate(groups, 1): msg_out += f"{i}. {g}\n"
+                            msg_out = "  <b>LIST GRUP KAMU</b>\n\n"
+                            for i, g in enumerate(my_groups, 1): msg_out += f"{i}. <code>{g}</code>\n"
                             send_msg(chat_id, msg_out)
 
                     elif text.startswith("/addnum"): 
@@ -2001,7 +2071,7 @@ def listen_command():
             print(f"Loop listener error: {e}")
             time.sleep(5)
 
-def send_audio_otp(otp, clean_sms, msg):
+def send_audio_otp(otp, clean_sms, msg, target_ids=None):
     try:
         angka_map = {"0": "nol", "1": "satu", "2": "dua", "3": "tiga", "4": "empat", "5": "lima", "6": "enam", "7": "tujuh", "8": "delapan", "9": "sembilan"}
         result = ["strip" if c == "-" else angka_map.get(c, c) for c in otp]
@@ -2014,7 +2084,7 @@ def send_audio_otp(otp, clean_sms, msg):
 
         url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendAudio"
 
-        for gid in groups:
+        for gid in (target_ids or []):
             with open(filename, "rb") as f:
                 requests.post(url, data={"chat_id": gid, "caption": msg, "parse_mode": "HTML"}, files={"audio": f})
     except Exception as e:
@@ -2022,12 +2092,67 @@ def send_audio_otp(otp, clean_sms, msg):
             
 # ================= BOT LOOP =================
 def run_bot():
+    global _premium_acc_cache
     while True:
         try:
-            with accounts_lock: current_accounts = list(accounts)
-            total_accounts = len(current_accounts)
+            # ---- 1. Bangun mapping email → user_id ----
+            email_to_uid = {}
+            with accounts_lock:
+                for acc in accounts:
+                    email_to_uid[acc["email"]] = OWNER_ID
 
-            for acc in current_accounts:
+            users_data = load_users()
+            owner_emails = set(email_to_uid.keys())
+            for uid_str, udata in users_data.items():
+                try:
+                    uid_int = int(uid_str)
+                except Exception:
+                    continue
+                for em in udata.get("emails", []):
+                    if em not in owner_emails:
+                        email_to_uid[em] = uid_int
+
+            # ---- 2. Sinkronisasi session premium user (persistent, tidak dibuat ulang tiap loop) ----
+            prem_cookies = load_premium_cookies()
+            active_prem_emails = set()
+            for uid_str, udata in users_data.items():
+                for em in udata.get("emails", []):
+                    if em in owner_emails:
+                        continue
+                    if em not in prem_cookies:
+                        continue
+                    active_prem_emails.add(em)
+                    if em not in _premium_acc_cache:
+                        prem_acc = {
+                            "email": em,
+                            "password": None,
+                            "cookies": prem_cookies[em],
+                            "session": make_httpx_client(),
+                            "last_login": 0,
+                            "csrf_token": "",
+                        }
+                        prem_acc["session"].cookies.update(prem_cookies[em])
+                        _premium_acc_cache[em] = prem_acc
+                    else:
+                        cached = _premium_acc_cache[em]
+                        if cached.get("cookies") != prem_cookies[em]:
+                            cached["cookies"] = prem_cookies[em]
+                            cached["session"].cookies.clear()
+                            cached["session"].cookies.update(prem_cookies[em])
+                            cached["last_login"] = 0
+
+            # Hapus cache akun premium yang sudah dihapus user
+            for em in list(_premium_acc_cache.keys()):
+                if em not in active_prem_emails:
+                    del _premium_acc_cache[em]
+
+            # ---- 3. Gabungkan semua akun (owner + premium) ----
+            with accounts_lock:
+                current_accounts = list(accounts)
+            all_accounts = current_accounts + list(_premium_acc_cache.values())
+            total_accounts = len(all_accounts)
+
+            for acc in all_accounts:
                 email = acc.get("email")
                 if not email: continue
 
@@ -2039,6 +2164,12 @@ def run_bot():
                     acc["last_login"] = 0
 
                 if not ensure_login(acc): continue
+
+                # ---- 4. Tentukan pemilik akun & tujuan kirim SMS ----
+                owner_uid = email_to_uid.get(email, OWNER_ID)
+                my_groups = get_user_groups(owner_uid)
+                # Kirim ke grup kalau sudah addgrup, kalau belum → private chat user
+                send_targets = my_groups if my_groups else [str(owner_uid)]
 
                 ranges = get_ranges(acc)
                 for rng in ranges:
@@ -2081,14 +2212,15 @@ def run_bot():
                                 f"<code>{clean_sms_display}</code>"
                             )
 
-                            for gid in groups:
+                            # ---- 5. Kirim HANYA ke target milik user pemilik akun ----
+                            for gid in send_targets:
                                 try:
                                     requests.post(
                                         f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
                                         data={"chat_id": gid, "text": msg, "parse_mode": "HTML"},
                                         timeout=10
                                     )
-                                except:
+                                except Exception:
                                     pass
 
                             sent_cache.add(sms_uid)
@@ -2097,7 +2229,7 @@ def run_bot():
                             sms_stats["total_otp"] += 1
                             sms_stats["total_number"].add(full_num)
 
-                            print(Fore.GREEN + f"OTP TERKIRIM | {masked_num} | {otp}")
+                            print(Fore.GREEN + f"OTP TERKIRIM → UID:{owner_uid} | {masked_num} | {otp}")
 
             time.sleep(1)
         except Exception as e:
