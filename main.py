@@ -964,8 +964,7 @@ def process_addnum_target(chat_id, user_id, target_text):
                     f"➕ <b>ADD NUMBER SELESAI</b>\n\n"
                     f"<blockquote>"
                     f"📧 Email: <code>{email}</code>\n"
-                    f"🎯 Range: <code>{ranges[0]}</code>\n"
-                    f"✅ Berhasil: <b>{r['success']}</b> nomor\n"
+                    f"✅ <code>{ranges[0]}</code>\n"
                     f"⚠️ Berhenti: Slot akun sudah penuh"
                     f"</blockquote>"
                 )
@@ -974,14 +973,12 @@ def process_addnum_target(chat_id, user_id, target_text):
                     f"➕ <b>ADD NUMBER {'BERHASIL' if r['success'] > 0 else 'GAGAL'}</b>\n\n"
                     f"<blockquote>"
                     f"📧 Email: <code>{email}</code>\n"
-                    f"🎯 Range: <code>{ranges[0]}</code>\n"
-                    f"✅ Berhasil: <b>{r['success']}</b> dari <b>{r['total']}</b> nomor\n"
-                    f"❌ Gagal: <b>{r['fail']}</b>"
+                    f"{'✅' if r['success'] > 0 else '❌'} <code>{ranges[0]}</code>"
                     f"</blockquote>"
                 )
         else:
-            total_success = sum(r["success"] for r in results)
-            total_fail    = sum(r["fail"]    for r in results)
+            total_ok   = sum(1 for r in results if r.get("success", 0) > 0)
+            total_fail = sum(1 for r in results if r.get("success", 0) == 0 and not r.get("skipped") and not r.get("error") and not r.get("not_found"))
             lines = ""
             for r in results:
                 if r.get("error"):
@@ -991,9 +988,9 @@ def process_addnum_target(chat_id, user_id, target_text):
                 elif r["skipped"] and r["success"] == 0:
                     status = "⚠️ Penuh"
                 elif r["skipped"]:
-                    status = f"✅ {r['success']} (lalu penuh)"
+                    status = "✅ (lalu penuh)"
                 elif r["success"] > 0:
-                    status = f"✅ {r['success']} nomor"
+                    status = "✅"
                 else:
                     status = "❌ Gagal"
                 lines += f"• <code>{r['range']}</code>: {status}\n"
@@ -1002,7 +999,7 @@ def process_addnum_target(chat_id, user_id, target_text):
                 f"➕ <b>ADD NUMBER SELESAI</b>\n\n"
                 f"<blockquote>"
                 f"📧 Email: <code>{email}</code>\n"
-                f"🔢 Total: ✅ <b>{total_success}</b> berhasil | ❌ <b>{total_fail}</b> gagal\n\n"
+                f"🔢 Total: ✅ <b>{total_ok}</b> berhasil | ❌ <b>{total_fail}</b> gagal\n\n"
                 f"{lines.strip()}"
                 f"</blockquote>"
             )
