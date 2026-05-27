@@ -57,7 +57,7 @@ USERS_FILE = "users.json"
 PREMIUM_FILE = "premium.json"
 AMBIL_FILE = "file/ambil_nomor.json"
 PREMIUM_COOKIE_FILE = "premium-cookie.json"
-LINK_OWNER = "t.me/maklocuki"
+LINK_OWNER = "t.me/kicenxensai"
 LINK_CHANNEL = "https://t.me/xorakuk"
 
 SERVICE_SHORT = {
@@ -589,7 +589,7 @@ def handle_start(user_id, chat_id):
             "🔵 <b>PRO</b>    — 7 Hari / 50 Req  → Rp25.000\n"
             "🟣 <b>SULTAN</b> — 30 Hari / 100 Req → Rp40.000"
             "</blockquote>\n\n"
-            "📩 @maklocuki untuk beli akses."
+            "📩 @kicenxensai untuk beli akses."
         )
 
     try:
@@ -671,7 +671,7 @@ def handle_addnum_email_cb(chat_id, user_id, email, cb_id, msg_id):
         delete_and_send(chat_id, msg_id,
             "➕ <b>ADD NUMBER</b>\n\n"
             "❌ <b>Limit premium harian kamu sudah habis.</b>\n"
-            "<blockquote>Hubungi @maklocuki untuk upgrade limit.</blockquote>")
+            "<blockquote>Hubungi @kicenxensai untuk upgrade limit.</blockquote>")
         return
     new_msg_id = delete_and_send_with_cancel(chat_id, msg_id,
         f"➕ <b>ADD NUMBER</b>\n\n"
