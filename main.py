@@ -685,7 +685,7 @@ def handle_addnum_email_cb(chat_id, user_id, email, cb_id, msg_id):
     )
     pending_addnum[user_id] = {"email": email, "msg_id": new_msg_id}
 
-def _do_addnum_range(acc, session, csrf, target_text):
+def _do_addnum_range(acc, session, csrf, target_text, progress_cb=None):
     """Fetch test numbers dan add untuk 1 range. Return dict hasil."""
     test_url = f"{BASE}/portal/numbers/test"
     hdrs = {
@@ -720,18 +720,13 @@ def _do_addnum_range(acc, session, csrf, target_text):
         return r.json()
 
     try:
-        probe       = _fetch_test(1)
-        probe_rows  = probe.get("data", [])
-        max_per_acc = 500
-        for row in probe_rows:
-            if isinstance(row, dict):
-                rng = re.sub(r"<[^>]+>", "", str(row.get("range", ""))).strip()
-                if rng.lower().strip() == target_text.lower().strip():
-                    v = str(row.get("limit_did_a2p", "")).strip()
-                    if v.isdigit():
-                        max_per_acc = int(v)
-                    break
-        data = _fetch_test(max_per_acc)
+        # Probe dulu untuk tahu total nomor yang tersedia (recordsFiltered)
+        probe      = _fetch_test(1)
+        total_avail = int(probe.get("recordsFiltered", probe.get("recordsTotal", 0)))
+        # Gunakan total_avail agar semua nomor di range bisa di-fetch
+        # Minimal fetch 100, maksimal 1000 agar tidak terlalu berat
+        fetch_count = max(100, min(total_avail if total_avail > 0 else 1000, 1000))
+        data = _fetch_test(fetch_count)
         rows = data.get("data", [])
     except Exception as e:
         return {"success": 0, "fail": 0, "skipped": False, "total": 0,
@@ -771,8 +766,10 @@ def _do_addnum_range(acc, session, csrf, target_text):
     fail_count    = 0
     skipped       = False
     skip_msg      = ""
+    total_items   = len(items)
+    _last_cb_at   = [0]  # track kapan terakhir kirim progress
 
-    for item in items:
+    for idx, item in enumerate(items):
         tid = item["tid"]
         try:
             resp = session.post(add_url, data={"id": tid, "_token": csrf},
@@ -805,8 +802,17 @@ def _do_addnum_range(acc, session, csrf, target_text):
         except Exception:
             fail_count += 1
 
+        # Kirim progress callback setiap 10 nomor atau di nomor terakhir
+        done = idx + 1
+        if progress_cb and (done - _last_cb_at[0] >= 10 or done == total_items):
+            try:
+                progress_cb(done, total_items, success_count, fail_count)
+            except Exception:
+                pass
+            _last_cb_at[0] = done
+
     return {"success": success_count, "fail": fail_count, "skipped": skipped,
-            "total": len(items), "skip_msg": skip_msg, "not_found": False, "error": None}
+            "total": total_items, "skip_msg": skip_msg, "not_found": False, "error": None}
 
 
 def process_addnum_target(chat_id, user_id, target_text):
@@ -821,7 +827,6 @@ def process_addnum_target(chat_id, user_id, target_text):
     ranges = [r.strip() for r in raw_ranges if r.strip()]
     if not ranges:
         return False
-    multi = len(ranges) > 1
 
     preview = ", ".join(f"<code>{r}</code>" for r in ranges[:3])
     if len(ranges) > 3:
@@ -831,36 +836,37 @@ def process_addnum_target(chat_id, user_id, target_text):
         f"➕ <b>ADD NUMBER</b>\n\n"
         f"<blockquote>"
         f"📧 Email: <code>{email}</code>\n"
-        f"🎯 {'Range' if not multi else f'{len(ranges)} Range'}: {preview}\n\n"
+        f"🎯 {'Range' if len(ranges) == 1 else f'{len(ranges)} Range'}: {preview}\n\n"
         f"⏳ Mencari nomor di range...</blockquote>")
 
-    acc = None
-    with accounts_lock:
-        for a in accounts:
-            if a.get("email") == email:
-                acc = a
-                break
+    def _run():
+        multi = len(ranges) > 1
+        acc = None
+        with accounts_lock:
+            for a in accounts:
+                if a.get("email") == email:
+                    acc = a
+                    break
 
-    if not acc:
-        delete_and_send(chat_id, proc_id,
-            f"➕ <b>ADD NUMBER</b>\n\n"
-            f"❌ Akun <code>{email}</code> tidak ditemukan.")
-        return True
+        if not acc:
+            delete_and_send(chat_id, proc_id,
+                f"➕ <b>ADD NUMBER</b>\n\n"
+                f"❌ Akun <code>{email}</code> tidak ditemukan.")
+            return
 
-    if not ensure_login(acc):
-        delete_and_send(chat_id, proc_id,
-            f"➕ <b>ADD NUMBER</b>\n\n"
-            f"❌ Session akun <code>{email}</code> tidak aktif.\n"
-            f"Gunakan /setcookie untuk memperbarui cookie.")
-        return True
+        if not ensure_login(acc):
+            delete_and_send(chat_id, proc_id,
+                f"➕ <b>ADD NUMBER</b>\n\n"
+                f"❌ Session akun <code>{email}</code> tidak aktif.\n"
+                f"Gunakan /setcookie untuk memperbarui cookie.")
+            return
 
-    session = acc["session"]
-    csrf    = acc.get("csrf_token", "")
-    results = []
+        session = acc["session"]
+        csrf    = acc.get("csrf_token", "")
+        results = []
 
-    for i, rng_target in enumerate(ranges):
-        if multi:
-            # Edit pesan yang sama — tidak delete/kirim baru
+        for i, rng_target in enumerate(ranges):
+            # Tampilkan status range saat ini (real-time)
             done_lines = ""
             for prev in results:
                 if prev.get("error"):
@@ -874,108 +880,139 @@ def process_addnum_target(chat_id, user_id, target_text):
                 else:
                     st = "❌ Gagal"
                 done_lines += f"• <code>{prev['range']}</code>: {st}\n"
-            edit_msg(chat_id, proc_id,
-                f"➕ <b>ADD NUMBER</b>\n\n"
-                f"<blockquote>"
-                f"📧 Email: <code>{email}</code>\n"
-                f"⏳ [{i+1}/{len(ranges)}] Proses: <code>{rng_target}</code>...\n"
-                + (f"\n{done_lines.strip()}" if done_lines else "")
-                + f"</blockquote>")
+
+            if multi:
+                edit_msg(chat_id, proc_id,
+                    f"➕ <b>ADD NUMBER</b>\n\n"
+                    f"<blockquote>"
+                    f"📧 Email: <code>{email}</code>\n"
+                    f"⏳ [{i+1}/{len(ranges)}] Proses: <code>{rng_target}</code>...\n"
+                    + (f"\n{done_lines.strip()}" if done_lines else "")
+                    + f"</blockquote>")
+            else:
+                edit_msg(chat_id, proc_id,
+                    f"➕ <b>ADD NUMBER</b>\n\n"
+                    f"<blockquote>"
+                    f"📧 Email: <code>{email}</code>\n"
+                    f"🎯 Range: <code>{rng_target}</code>\n\n"
+                    f"⏳ Memulai add nomor...</blockquote>")
+
+            # Progress callback — update pesan setiap 10 nomor (real-time)
+            def make_progress_cb(rng_name, p_id, is_multi, i_idx, tot_ranges, d_lines):
+                def _cb(done, total, ok, fail):
+                    pct = int(done / total * 100) if total else 0
+                    bar_filled = int(pct / 10)
+                    bar = "▓" * bar_filled + "░" * (10 - bar_filled)
+                    if is_multi:
+                        edit_msg(chat_id, p_id,
+                            f"➕ <b>ADD NUMBER</b>\n\n"
+                            f"<blockquote>"
+                            f"📧 Email: <code>{email}</code>\n"
+                            f"⏳ [{i_idx+1}/{tot_ranges}] <code>{rng_name}</code>\n"
+                            f"[{bar}] {pct}%\n"
+                            f"✅ {ok} berhasil | ❌ {fail} gagal | 📊 {done}/{total}\n"
+                            + (f"\n{d_lines.strip()}" if d_lines else "")
+                            + f"</blockquote>")
+                    else:
+                        edit_msg(chat_id, p_id,
+                            f"➕ <b>ADD NUMBER</b>\n\n"
+                            f"<blockquote>"
+                            f"📧 Email: <code>{email}</code>\n"
+                            f"🎯 Range: <code>{rng_name}</code>\n\n"
+                            f"[{bar}] {pct}%\n"
+                            f"✅ {ok} berhasil | ❌ {fail} gagal | 📊 {done}/{total}</blockquote>")
+                return _cb
+
+            cb = make_progress_cb(rng_target, proc_id, multi, i, len(ranges), done_lines)
+            r = _do_addnum_range(acc, session, csrf, rng_target, progress_cb=cb)
+            results.append({"range": rng_target, **r})
+            if i < len(ranges) - 1:
+                time.sleep(0.5)
+
+        if not multi:
+            r = results[0]
+            if r.get("error"):
+                result_text = (
+                    f"➕ <b>ADD NUMBER GAGAL</b>\n\n"
+                    f"<blockquote>"
+                    f"📧 Email: <code>{email}</code>\n"
+                    f"🎯 Range: <code>{ranges[0]}</code>\n"
+                    f"❌ Gagal fetch IVAS: <code>{r['error'][:100]}</code>"
+                    f"</blockquote>"
+                )
+            elif r.get("not_found"):
+                result_text = (
+                    f"➕ <b>ADD NUMBER GAGAL</b>\n\n"
+                    f"<blockquote>"
+                    f"📧 Email: <code>{email}</code>\n"
+                    f"🎯 Range: <code>{ranges[0]}</code>\n"
+                    f"❌ Range tidak ditemukan di Test Numbers."
+                    f"</blockquote>"
+                )
+            elif r["skipped"] and r["success"] == 0:
+                result_text = (
+                    f"➕ <b>ADD NUMBER GAGAL</b>\n\n"
+                    f"<blockquote>"
+                    f"📧 Email: <code>{email}</code>\n"
+                    f"🎯 Range: <code>{ranges[0]}</code>\n"
+                    f"⚠️ Slot nomor di range ini sudah penuh\n\n"
+                    f"Hubungi admin IVAS untuk tambah kuota."
+                    f"</blockquote>"
+                )
+            elif r["skipped"]:
+                result_text = (
+                    f"➕ <b>ADD NUMBER SELESAI</b>\n\n"
+                    f"<blockquote>"
+                    f"📧 Email: <code>{email}</code>\n"
+                    f"🎯 Range: <code>{ranges[0]}</code>\n"
+                    f"✅ Berhasil: <b>{r['success']}</b> nomor\n"
+                    f"⚠️ Berhenti: Slot akun sudah penuh"
+                    f"</blockquote>"
+                )
+            else:
+                result_text = (
+                    f"➕ <b>ADD NUMBER {'BERHASIL' if r['success'] > 0 else 'GAGAL'}</b>\n\n"
+                    f"<blockquote>"
+                    f"📧 Email: <code>{email}</code>\n"
+                    f"🎯 Range: <code>{ranges[0]}</code>\n"
+                    f"✅ Berhasil: <b>{r['success']}</b> dari <b>{r['total']}</b> nomor\n"
+                    f"❌ Gagal: <b>{r['fail']}</b>"
+                    f"</blockquote>"
+                )
         else:
-            edit_msg(chat_id, proc_id,
-                f"➕ <b>ADD NUMBER</b>\n\n"
-                f"<blockquote>"
-                f"📧 Email: <code>{email}</code>\n"
-                f"🎯 Range: <code>{rng_target}</code>\n\n"
-                f"⏳ Sedang menambahkan...</blockquote>")
+            total_success = sum(r["success"] for r in results)
+            total_fail    = sum(r["fail"]    for r in results)
+            lines = ""
+            for r in results:
+                if r.get("error"):
+                    status = "❌ Error fetch"
+                elif r.get("not_found"):
+                    status = "❌ Tidak ditemukan"
+                elif r["skipped"] and r["success"] == 0:
+                    status = "⚠️ Penuh"
+                elif r["skipped"]:
+                    status = f"✅ {r['success']} (lalu penuh)"
+                elif r["success"] > 0:
+                    status = f"✅ {r['success']} nomor"
+                else:
+                    status = "❌ Gagal"
+                lines += f"• <code>{r['range']}</code>: {status}\n"
 
-        r = _do_addnum_range(acc, session, csrf, rng_target)
-        results.append({"range": rng_target, **r})
-        if i < len(ranges) - 1:
-            time.sleep(0.5)
-
-    if not multi:
-        r = results[0]
-        if r.get("error"):
-            result_text = (
-                f"➕ <b>ADD NUMBER GAGAL</b>\n\n"
-                f"<blockquote>"
-                f"📧 Email: <code>{email}</code>\n"
-                f"🎯 Range: <code>{ranges[0]}</code>\n"
-                f"❌ Gagal fetch IVAS: <code>{r['error'][:100]}</code>"
-                f"</blockquote>"
-            )
-        elif r.get("not_found"):
-            result_text = (
-                f"➕ <b>ADD NUMBER GAGAL</b>\n\n"
-                f"<blockquote>"
-                f"📧 Email: <code>{email}</code>\n"
-                f"🎯 Range: <code>{ranges[0]}</code>\n"
-                f"❌ Range tidak ditemukan di Test Numbers."
-                f"</blockquote>"
-            )
-        elif r["skipped"] and r["success"] == 0:
-            result_text = (
-                f"➕ <b>ADD NUMBER GAGAL</b>\n\n"
-                f"<blockquote>"
-                f"📧 Email: <code>{email}</code>\n"
-                f"🎯 Range: <code>{ranges[0]}</code>\n"
-                f"⚠️ Slot nomor di range ini sudah penuh\n\n"
-                f"Hubungi admin IVAS untuk tambah kuota."
-                f"</blockquote>"
-            )
-        elif r["skipped"]:
             result_text = (
                 f"➕ <b>ADD NUMBER SELESAI</b>\n\n"
                 f"<blockquote>"
                 f"📧 Email: <code>{email}</code>\n"
-                f"🎯 Range: <code>{ranges[0]}</code>\n"
-                f"✅ Berhasil: <b>{r['success']}</b>\n"
-                f"⚠️ Berhenti: Slot akun sudah penuh"
+                f"🔢 Total: ✅ <b>{total_success}</b> berhasil | ❌ <b>{total_fail}</b> gagal\n\n"
+                f"{lines.strip()}"
                 f"</blockquote>"
             )
+
+        if multi:
+            edit_msg(chat_id, proc_id, result_text)
         else:
-            result_text = (
-                f"➕ <b>ADD NUMBER {'BERHASIL' if r['success'] > 0 else 'GAGAL'}</b>\n\n"
-                f"<blockquote>"
-                f"📧 Email: <code>{email}</code>\n"
-                f"🎯 Range: <code>{ranges[0]}</code>\n"
-                f"✅ Berhasil: <b>{r['success']}</b> dari <b>{r['total']}</b> nomor\n"
-                f"❌ Gagal: <b>{r['fail']}</b>"
-                f"</blockquote>"
-            )
-    else:
-        total_success = sum(r["success"] for r in results)
-        total_fail    = sum(r["fail"]    for r in results)
-        lines = ""
-        for r in results:
-            if r.get("error"):
-                status = "❌ Error fetch"
-            elif r.get("not_found"):
-                status = "❌ Tidak ditemukan"
-            elif r["skipped"] and r["success"] == 0:
-                status = "⚠️ Penuh"
-            elif r["skipped"]:
-                status = f"✅ {r['success']} (lalu penuh)"
-            elif r["success"] > 0:
-                status = f"✅ {r['success']} nomor"
-            else:
-                status = "❌ Gagal"
-            lines += f"• <code>{r['range']}</code>: {status}\n"
+            delete_and_send(chat_id, proc_id, result_text)
 
-        result_text = (
-            f"➕ <b>ADD NUMBER SELESAI</b>\n\n"
-            f"<blockquote>"
-            f"📧 Email: <code>{email}</code>\n"
-            f"🔢 Total: ✅ <b>{total_success}</b> berhasil | ❌ <b>{total_fail}</b> gagal\n\n"
-            f"{lines.strip()}"
-            f"</blockquote>"
-        )
-
-    if multi:
-        edit_msg(chat_id, proc_id, result_text)
-    else:
-        delete_and_send(chat_id, proc_id, result_text)
+    threading.Thread(target=_run, daemon=True).start()
     return True
 
 
