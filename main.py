@@ -10,6 +10,8 @@ import hashlib
 import phonenumbers
 from phonenumbers import geocoder
 import requests
+import signal
+import sys
 from langdetect import detect, LangDetectException, DetectorFactory
 from colorama import init, Fore, Style
 
@@ -85,6 +87,13 @@ _session_fail_time   = {}   # email -> timestamp pertama kali gagal
 _session_notified    = {}   # email -> bool sudah notif atau belum
 _session_retry_time  = {}   # email -> timestamp terakhir retry
 _session_recovered   = {}   # email -> bool sudah notif recover
+
+# ================= THREAD-SAFE CACHE & SHARED STATE =================
+_sent_cache_lock  = threading.Lock()
+_cache_dirty      = False
+_last_cache_save  = 0.0
+# Dibaca worker threads — diupdate oleh run_bot() manager thread
+_bot_state = {"email_to_uid": {}, "total_accounts": 0}
 
 # ================= ACCOUNT MANAGEMENT =================
 def load_accounts():
@@ -282,6 +291,19 @@ def save_sent_cache():
             json.dump(cache_list, f)
     except Exception as e:
         print(f"Error save cache: {e}")
+
+def save_sent_cache_debounced():
+    """Tandai cache perlu disimpan; flush max sekali per 5 detik."""
+    global _cache_dirty, _last_cache_save
+    _cache_dirty = True
+    if time.time() - _last_cache_save >= 5:
+        try:
+            with _sent_cache_lock:
+                save_sent_cache()
+            _last_cache_save = time.time()
+            _cache_dirty = False
+        except Exception as e:
+            print(f"WARN save cache: {e}")
 
 # ================= LOAD DATA =================
 accounts = load_accounts()
@@ -1907,6 +1929,7 @@ def tg_active(msg):
 # ================= TELEGRAM LISTENER =================
 def listen_command():
     global last_update_id
+    _backoff = 0
     while True:
         try:
             url = f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates"
@@ -2081,157 +2104,243 @@ def listen_command():
                 except Exception as ex: 
                     print(f"Error handling message: {ex}")
             time.sleep(2)
-        except Exception as e: 
-            print(f"Loop listener error: {e}")
-            time.sleep(5)
+        except Exception as e:
+            _backoff = min(_backoff + 2, 20)
+            print(f"Loop listener error: {e} — retry in {_backoff}s")
+            time.sleep(_backoff)
 
             
-# ================= BOT LOOP =================
-def run_bot():
-    global _premium_acc_cache
+# ================= POLL ENGINE (per-account) =================
+
+def poll_one_account(acc):
+    """Satu iterasi polling SMS untuk satu akun. Dipanggil oleh account_worker."""
+    email = acc.get("email", "")
+    if not email:
+        return
+
+    # Cek session retry
+    if _session_notified.get(email):
+        if time.time() - _session_retry_time.get(email, 0) < SESSION_RETRY_INTERVAL:
+            return
+        print(f"  AUTO-RETRY SESSION: {email}")
+        acc["last_login"] = 0
+
+    if not ensure_login(acc):
+        return
+
+    owner_uid = _bot_state["email_to_uid"].get(email, OWNER_ID)
+    my_groups = get_user_groups(owner_uid)
+    send_targets = my_groups if my_groups else [str(owner_uid)]
+    total = _bot_state["total_accounts"]
+
+    try:
+        ranges = get_ranges(acc)
+    except Exception as e:
+        print(f"WARN get_ranges [{email}]: {e}")
+        return
+
+    for rng in ranges:
+        fallback_country, code = parse_range(rng)
+        try:
+            numbers = get_numbers(acc, rng)
+        except Exception as e:
+            print(f"WARN get_numbers [{email}]: {e}")
+            continue
+
+        for num in numbers:
+            full_num = normalize_number(num, code)
+            if not full_num.isdigit():
+                continue
+
+            try:
+                sms_list = get_sms(acc, rng, num)
+            except Exception as e:
+                print(f"WARN get_sms [{email}]: {e}")
+                continue
+
+            for sms in sms_list:
+                clean_sms = re.sub(r"\s+", " ", sms.replace("<#>", "")).strip()
+                sms_uid = hashlib.md5(f"{num}-{clean_sms}".encode()).hexdigest()
+
+                with _sent_cache_lock:
+                    if sms_uid in sent_cache:
+                        continue
+
+                matches = re.findall(r"\b\d{3}[- ]?\d{3}\b", sms)
+                if not matches:
+                    continue
+
+                otp = matches[0].replace(" ", "-")
+                masked_num = format_phone_number(full_num)
+                service_name = extract_service_short(sms)
+                country, flag = detect_country_and_flag(full_num, fallback_country)
+                clean_sms_display = clean_sms[:300]
+
+                msg = (
+                    f"<b>🔔 OTP BARU DITERIMA!</b>\n\n"
+                    f"<blockquote><b>📱 Nomor :</b> <code>{masked_num}</code></blockquote>\n"
+                    f"<b>🔑 OTP :</b> <code>{otp}</code>\n"
+                    f"<blockquote><b>🛒 Service :</b> {service_name}</blockquote>\n"
+                    f"<blockquote><b>🌍 Negara :</b> {country} {flag}</blockquote>\n"
+                    f"<blockquote><b>📧 Email :</b> {mask_email(email)}</blockquote>\n"
+                    f"<blockquote><b>📊 Total Aktif :</b> {total} Akun</blockquote>\n\n"
+                    f"💬 <b>Pesan:</b>\n"
+                    f"<code>{clean_sms_display}</code>"
+                )
+
+                for gid in send_targets:
+                    try:
+                        requests.post(
+                            f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+                            data={"chat_id": gid, "text": msg, "parse_mode": "HTML"},
+                            timeout=8
+                        )
+                    except Exception:
+                        pass
+
+                with _sent_cache_lock:
+                    sent_cache.add(sms_uid)
+                save_sent_cache_debounced()
+
+                sms_stats["total_sms"] += 1
+                sms_stats["total_otp"] += 1
+                if len(sms_stats["total_number"]) < 10000:
+                    sms_stats["total_number"].add(full_num)
+
+                user_display = get_user_display(owner_uid)
+                print(Fore.GREEN + f"OTP → {user_display} ({mask_email(email)}) | {masked_num} | {otp}")
+
+
+def account_worker(acc):
+    """Thread mandiri per akun — polling loop tanpa blokir akun lain."""
+    email = acc.get("email", "")
     while True:
         try:
-            # ---- 1. Bangun mapping email → user_id ----
-            email_to_uid = {}
-            with accounts_lock:
-                for acc in accounts:
-                    email_to_uid[acc["email"]] = OWNER_ID
-
-            users_data = load_users()
-            owner_emails = set(email_to_uid.keys())
-            for uid_str, udata in users_data.items():
-                try:
-                    uid_int = int(uid_str)
-                except Exception:
-                    continue
-                for em in udata.get("emails", []):
-                    if em not in owner_emails:
-                        email_to_uid[em] = uid_int
-
-            # ---- 2. Sinkronisasi session premium user (persistent, tidak dibuat ulang tiap loop) ----
-            prem_cookies = load_premium_cookies()
-            active_prem_emails = set()
-            for uid_str, udata in users_data.items():
-                for em in udata.get("emails", []):
-                    if em in owner_emails:
-                        continue
-                    if em not in prem_cookies:
-                        continue
-                    active_prem_emails.add(em)
-                    if em not in _premium_acc_cache:
-                        prem_acc = {
-                            "email": em,
-                            "password": None,
-                            "cookies": prem_cookies[em],
-                            "session": make_httpx_client(),
-                            "last_login": 0,
-                            "csrf_token": "",
-                        }
-                        prem_acc["session"].cookies.update(prem_cookies[em])
-                        _premium_acc_cache[em] = prem_acc
-                    else:
-                        cached = _premium_acc_cache[em]
-                        if cached.get("cookies") != prem_cookies[em]:
-                            cached["cookies"] = prem_cookies[em]
-                            cached["session"].cookies.clear()
-                            cached["session"].cookies.update(prem_cookies[em])
-                            cached["last_login"] = 0
-
-            # Hapus cache akun premium yang sudah dihapus user
-            for em in list(_premium_acc_cache.keys()):
-                if em not in active_prem_emails:
-                    del _premium_acc_cache[em]
-
-            # ---- 3. Gabungkan semua akun (owner + premium) ----
-            with accounts_lock:
-                current_accounts = list(accounts)
-            all_accounts = current_accounts + list(_premium_acc_cache.values())
-            total_accounts = len(all_accounts)
-
-            for acc in all_accounts:
-                email = acc.get("email")
-                if not email: continue
-
-                if _session_notified.get(email):
-                    last_retry = _session_retry_time.get(email, 0)
-                    if time.time() - last_retry < SESSION_RETRY_INTERVAL:
-                        continue
-                    print(f"  AUTO-RETRY SESSION : {email}")
-                    acc["last_login"] = 0
-
-                if not ensure_login(acc): continue
-
-                # ---- 4. Tentukan pemilik akun & tujuan kirim SMS ----
-                owner_uid = email_to_uid.get(email, OWNER_ID)
-                my_groups = get_user_groups(owner_uid)
-                # Kirim ke grup kalau sudah addgrup, kalau belum → private chat user
-                send_targets = my_groups if my_groups else [str(owner_uid)]
-
-                ranges = get_ranges(acc)
-                for rng in ranges:
-                    fallback_country, code = parse_range(rng)
-                    numbers = get_numbers(acc, rng)
-
-                    for num in numbers:
-                        full_num = normalize_number(num, code)
-                        if not full_num.isdigit(): continue
-
-                        country, flag = detect_country_and_flag(full_num, fallback_country)
-                        sms_list = get_sms(acc, rng, num)
-
-                        for sms in sms_list:
-                            clean_sms = re.sub(r"\s+", " ", sms.replace("<#>", "")).strip()
-                            sms_uid = hashlib.md5(f"{num}-{clean_sms}".encode()).hexdigest()
-                            if sms_uid in sent_cache:
-                                continue
-
-                            matches = re.findall(r"\b\d{3}[- ]?\d{3}\b", sms)
-                            if not matches:
-                                continue
-
-                            otp = matches[0].replace(" ", "-")
-                            clean_sms_display = clean_sms[:300]
-
-                            masked_num = format_phone_number(full_num)
-                            service_name = extract_service_short(sms)
-                            country, flag = detect_country_and_flag(full_num, fallback_country)
-
-                            msg = (
-                                f"<b>🔔 OTP BARU DITERIMA!</b>\n\n"
-                                f"<blockquote><b>📱 Nomor :</b> <code>{masked_num}</code></blockquote>\n"
-                                f"<b>🔑 OTP :</b> <code>{otp}</code>\n"
-                                f"<blockquote><b>🛒 Service :</b> {service_name}</blockquote>\n"
-                                f"<blockquote><b>🌍 Negara :</b> {country} {flag}</blockquote>\n"
-                                f"<blockquote><b>📧 Email :</b> {mask_email(email)}</blockquote>\n"
-                                f"<blockquote><b>📊 Total Aktif :</b> {total_accounts} Akun</blockquote>\n\n"
-                                f"💬 <b>Pesan:</b>\n"
-                                f"<code>{clean_sms_display}</code>"
-                            )
-
-                            # ---- 5. Kirim HANYA ke target milik user pemilik akun ----
-                            for gid in send_targets:
-                                try:
-                                    requests.post(
-                                        f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
-                                        data={"chat_id": gid, "text": msg, "parse_mode": "HTML"},
-                                        timeout=10
-                                    )
-                                except Exception:
-                                    pass
-
-                            sent_cache.add(sms_uid)
-                            save_sent_cache()
-                            sms_stats["total_sms"] += 1
-                            sms_stats["total_otp"] += 1
-                            sms_stats["total_number"].add(full_num)
-
-                            user_display = get_user_display(owner_uid)
-                            print(Fore.GREEN + f"OTP TERKIRIM → {user_display} ({mask_email(email)}) | {masked_num} | {otp}")
-
-            time.sleep(1)
+            poll_one_account(acc)
         except Exception as e:
-            print(Fore.RED + f"ERROR BOT: {e}")
-            time.sleep(1)
+            print(Fore.RED + f"ERROR WORKER [{email}]: {e}")
+        time.sleep(1)
+
+
+# ================= BOT MANAGER (state sync + thread manager) =================
+def run_bot():
+    global _premium_acc_cache, _cache_dirty, _last_cache_save
+    _account_threads = {}   # email -> Thread
+    _last_sync       = 0.0
+
+    print(Fore.CYAN + Style.BRIGHT + "  BOT MANAGER STARTED — per-account threading aktif")
+
+    while True:
+        try:
+            now = time.time()
+
+            # ---- Sync state setiap 30 detik ----
+            if now - _last_sync >= 30:
+
+                # Rebuild email → user_id mapping
+                new_email_to_uid = {}
+                with accounts_lock:
+                    for acc in accounts:
+                        new_email_to_uid[acc["email"]] = OWNER_ID
+
+                users_data = load_users()
+                owner_emails = set(new_email_to_uid.keys())
+                for uid_str, udata in users_data.items():
+                    try:
+                        uid_int = int(uid_str)
+                    except Exception:
+                        continue
+                    for em in udata.get("emails", []):
+                        if em not in owner_emails:
+                            new_email_to_uid[em] = uid_int
+
+                # Sync premium account sessions
+                prem_cookies = load_premium_cookies()
+                active_prem_emails = set()
+                for uid_str, udata in users_data.items():
+                    for em in udata.get("emails", []):
+                        if em in owner_emails or em not in prem_cookies:
+                            continue
+                        active_prem_emails.add(em)
+                        if em not in _premium_acc_cache:
+                            prem_acc = {
+                                "email": em, "password": None,
+                                "cookies": prem_cookies[em],
+                                "session": make_httpx_client(),
+                                "last_login": 0, "csrf_token": "",
+                            }
+                            prem_acc["session"].cookies.update(prem_cookies[em])
+                            _premium_acc_cache[em] = prem_acc
+                        else:
+                            cached = _premium_acc_cache[em]
+                            if cached.get("cookies") != prem_cookies[em]:
+                                cached["cookies"] = prem_cookies[em]
+                                cached["session"].cookies.clear()
+                                cached["session"].cookies.update(prem_cookies[em])
+                                cached["last_login"] = 0
+
+                for em in list(_premium_acc_cache.keys()):
+                    if em not in active_prem_emails:
+                        del _premium_acc_cache[em]
+
+                # Update shared state (atomic dict replace)
+                with accounts_lock:
+                    all_accs = list(accounts) + list(_premium_acc_cache.values())
+                _bot_state["email_to_uid"]   = new_email_to_uid
+                _bot_state["total_accounts"] = len(all_accs)
+
+                # Spawn thread baru untuk akun yang belum punya thread / thread mati
+                active_emails = set()
+                for acc in all_accs:
+                    em = acc.get("email", "")
+                    if not em:
+                        continue
+                    active_emails.add(em)
+                    t = _account_threads.get(em)
+                    if t is None or not t.is_alive():
+                        nt = threading.Thread(
+                            target=account_worker, args=(acc,),
+                            daemon=True, name=f"poll-{em[:25]}"
+                        )
+                        nt.start()
+                        _account_threads[em] = nt
+                        print(Fore.YELLOW + f"  THREAD START: {em}")
+
+                # Hapus thread untuk akun yang sudah dihapus
+                for em in [e for e in list(_account_threads) if e not in active_emails]:
+                    del _account_threads[em]
+
+                _last_sync = now
+
+            else:
+                # Health-check ringan setiap siklus (2 detik) — respawn thread mati
+                for em, t in list(_account_threads.items()):
+                    if not t.is_alive():
+                        print(Fore.YELLOW + f"  THREAD MATI, RESPAWN: {em}")
+                        with accounts_lock:
+                            all_now = list(accounts) + list(_premium_acc_cache.values())
+                        for acc in all_now:
+                            if acc.get("email") == em:
+                                nt = threading.Thread(
+                                    target=account_worker, args=(acc,),
+                                    daemon=True, name=f"poll-{em[:25]}"
+                                )
+                                nt.start()
+                                _account_threads[em] = nt
+                                break
+
+            # Flush cache kalau dirty tapi belum sempat tersimpan
+            if _cache_dirty and time.time() - _last_cache_save >= 5:
+                with _sent_cache_lock:
+                    save_sent_cache()
+                _last_cache_save = time.time()
+                _cache_dirty = False
+
+            time.sleep(2)
+
+        except Exception as e:
+            print(Fore.RED + f"ERROR BOT MANAGER: {e}")
+            time.sleep(2)
 
             
 # ================= KEEP-ALIVE SERVER =================
@@ -2250,6 +2359,20 @@ def run_keepalive():
     HTTPServer.allow_reuse_address = True
     server = HTTPServer(("0.0.0.0", 5000), KeepAliveHandler)
     server.serve_forever()
+
+# ================= GRACEFUL SHUTDOWN (Railway SIGTERM) =================
+def _graceful_shutdown(signum, frame):
+    print(Fore.YELLOW + "\n  SIGNAL DITERIMA — menyimpan state sebelum shutdown...")
+    try:
+        with _sent_cache_lock:
+            save_sent_cache()
+    except Exception:
+        pass
+    print(Fore.YELLOW + "  State tersimpan. Bye!")
+    sys.exit(0)
+
+signal.signal(signal.SIGTERM, _graceful_shutdown)
+signal.signal(signal.SIGINT,  _graceful_shutdown)
 
 # ================= START BOT =================
 threading.Thread(target=run_keepalive, daemon=True).start()
