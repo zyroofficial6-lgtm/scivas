@@ -244,6 +244,22 @@ def get_or_create_user_key(user_id):
 # ===== PREMIUM ACCOUNT SESSION CACHE =====
 _premium_acc_cache = {}  # email -> acc dict (persistent session untuk premium user)
 
+# ===== USERNAME CACHE (in-memory, diisi saat user kirim pesan) =====
+_username_cache = {}  # user_id (int) -> "@username" atau "uid:xxx"
+
+def store_username(user_id, from_obj):
+    """Simpan username dari objek 'from' Telegram ke cache."""
+    uname = from_obj.get("username")
+    if uname:
+        _username_cache[user_id] = f"@{uname}"
+    else:
+        first = from_obj.get("first_name", "")
+        _username_cache[user_id] = first if first else f"uid:{user_id}"
+
+def get_user_display(user_id):
+    """Ambil label display user untuk console log."""
+    return _username_cache.get(user_id, f"uid:{user_id}")
+
 def load_sent_cache():
     os.makedirs("file", exist_ok=True)
     if not os.path.exists(CACHE_FILE):
@@ -539,7 +555,6 @@ def send_msg(chat_id, text):
     requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage", data={"chat_id": chat_id, "text": text, "parse_mode": "HTML"}) 
     
 def cek_premium(chat_id, user_id):
-    user_key = get_or_create_user_key(user_id)
     my_groups = get_user_groups(user_id)
     grup_status = f"{len(my_groups)} grup" if my_groups else "Belum addgrup (PM aktif)"
     if user_id == OWNER_ID:
@@ -547,7 +562,6 @@ def cek_premium(chat_id, user_id):
             f"  <b>STATUS PREMIUM</b>\n\n"
             f"<blockquote>"
             f"👑 Mode     : OWNER\n"
-            f"🔑 Key      : <code>{user_key}</code>\n"
             f"♾️ Akses    : Unlimited\n"
             f"💬 Grup     : {grup_status}"
             f"</blockquote>"
@@ -588,12 +602,10 @@ def handle_start(user_id, chat_id):
     THUMBNAIL_PATH = "./thumbnail.png"
 
     if owner or is_prem:
-        user_key = get_or_create_user_key(user_id)
         if owner:
             caption = (
                 "🤖 <b>BOT OTP IVAS V7</b>\n"
                 "<i>SMS/OTP monitoring — Platform IVAS</i>\n\n"
-                f"🔑 <b>KEY:</b> <code>{user_key}</code>\n\n"
                 "👑 <b>OWNER</b>\n"
                 "<blockquote>"
                 "/setcookie\n"
@@ -626,6 +638,7 @@ def handle_start(user_id, chat_id):
                 "</blockquote>"
             )
         else:
+            user_key = get_or_create_user_key(user_id)
             caption = (
                 "🤖 <b>BOT OTP IVAS V7</b>\n"
                 "<i>SMS/OTP monitoring — Platform IVAS</i>\n\n"
@@ -1969,6 +1982,8 @@ def listen_command():
                     chat_id = msg["chat"]["id"]
                     msg_id = msg["message_id"]
 
+                    store_username(user_id, msg["from"])
+
                     owner = is_owner(user_id)
                     is_group = msg["chat"]["type"] in ["group", "supergroup"]
 
@@ -2229,7 +2244,8 @@ def run_bot():
                             sms_stats["total_otp"] += 1
                             sms_stats["total_number"].add(full_num)
 
-                            print(Fore.GREEN + f"OTP TERKIRIM → UID:{owner_uid} | {masked_num} | {otp}")
+                            user_display = get_user_display(owner_uid)
+                            print(Fore.GREEN + f"OTP TERKIRIM → {user_display} ({mask_email(email)}) | {masked_num} | {otp}")
 
             time.sleep(1)
         except Exception as e:
