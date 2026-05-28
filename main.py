@@ -785,7 +785,7 @@ def handle_start(user_id, chat_id):
             "/cekivas\n"
             "/cekprem"
             "</blockquote>\n\n"
-            "💬 <b>GROUP</b>\n"
+            "💬 <b>GROUP</b> <i>(gratis)</i>\n"
             "<blockquote>"
             "/addgrup\n"
             "/delgrup\n"
@@ -2169,20 +2169,16 @@ def listen_command():
                             gid = str(chat_id)
                             if gid in get_user_groups(user_id):
                                 send_msg(chat_id, "  Grup sudah ada di akun kamu")
-                            elif use_token(user_id):
+                            else:
                                 add_user_group(user_id, gid)
                                 send_msg(chat_id, f"✅ <b>Grup berhasil ditambahkan!</b>\n\n<blockquote>🆔 ID: <code>{gid}</code>\n🔑 Key: <code>{get_or_create_user_key(user_id)}</code></blockquote>")
-                            else:
-                                no_token_msg(chat_id)
                         else: send_msg(chat_id, "  Jalankan di dalam grup!")
 
                     elif text.startswith("/delgrup"):
-                        if use_token(user_id):
-                            gid = str(chat_id)
-                            if remove_user_group(user_id, gid):
-                                send_msg(chat_id, f"  Grup dihapus dari akun kamu:\n{gid}")
-                            else: send_msg(chat_id, "  Grup tidak ditemukan di akun kamu")
-                        else: no_token_msg(chat_id)
+                        gid = str(chat_id)
+                        if remove_user_group(user_id, gid):
+                            send_msg(chat_id, f"  Grup dihapus dari akun kamu:\n{gid}")
+                        else: send_msg(chat_id, "  Grup tidak ditemukan di akun kamu")
 
                     elif text.startswith("/listgrup"):
                         my_groups = get_user_groups(user_id)
