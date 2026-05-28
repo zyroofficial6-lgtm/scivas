@@ -1,6 +1,13 @@
 {
   "8317563450": {
     "emails": [],
-    "key": "KX-DDBF-D1E3"
+    "key": "KX-DDBF-D1E3",
+    "tokens": 19,
+    "last_token_reset": "2026-05-28"
+  },
+  "8525009817": {
+    "emails": [],
+    "tokens": 20,
+    "last_token_reset": "2026-05-28"
   }
 }
