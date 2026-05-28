@@ -750,7 +750,7 @@ def handle_start(user_id, chat_id):
             "/addemail email password\n"
             "/listemail\n"
             "/delcookie email\n"
-            "/addnum  <i>(premium)</i>\n"
+            "/addnum\n"
             "/delnumall\n"
             "/myrange\n"
             "/ambilfile\n"
@@ -777,7 +777,7 @@ def handle_start(user_id, chat_id):
             "/addemail email password\n"
             "/listemail\n"
             "/delcookie email\n"
-            "/addnum  <i>(premium)</i>\n"
+            "/addnum\n"
             "/delnumall\n"
             "/myrange\n"
             "/ambilfile\n"
@@ -802,6 +802,7 @@ def handle_start(user_id, chat_id):
             "/addemail email password  <i>(max 1 akun)</i>\n"
             "/listemail\n"
             "/delcookie email\n"
+            "/addnum\n"
             "/delnumall\n"
             "/myrange\n"
             "/ambilfile\n"
@@ -2228,13 +2229,9 @@ def listen_command():
                             for i, g in enumerate(my_groups, 1): msg_out += f"{i}. <code>{g}</code>\n"
                             send_msg(chat_id, msg_out)
 
-                    elif text.startswith("/addnum"): 
-                        if owner or is_premium(user_id): command_addnum(text, chat_id, user_id)
-                        else: send_msg(chat_id,
-                            "❌ <b>/addnum wajib Premium</b>\n\n"
-                            "<blockquote>Fitur tambah range/nomor memerlukan akun Premium.\n"
-                            f"📩 <a href='https://t.me/kicenxensai'>@kicenxensai</a></blockquote>"
-                        )
+                    elif text.startswith("/addnum"):
+                        if use_token(user_id): command_addnum(text, chat_id, user_id)
+                        else: no_token_msg(chat_id)
                         
                     elif text.startswith("/ambilfile"):
                         if use_token(user_id): command_ambilfile(text, chat_id, user_id)
