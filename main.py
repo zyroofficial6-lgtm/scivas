@@ -595,15 +595,38 @@ def add_cookie_premium(text, chat_id, user_id):
         
 def del_cookie_premium(text, chat_id, user_id):
     try:
-        if not is_premium(user_id): return
-        _, email = text.split()
+        parts = text.split()
+        if len(parts) < 2:
+            return send_msg(chat_id, "❌ Format:\n/delcookie email@gmail.com")
+        email = parts[1].strip().lower()
+
+        # Cek kepemilikan: email harus milik user ini (atau owner)
+        if not is_owner(user_id):
+            users_d = load_users()
+            owned = users_d.get(str(user_id), {}).get("emails", [])
+            if email not in owned:
+                return send_msg(chat_id, "❌ Akun tidak ditemukan di akun kamu")
+
+        # Hapus dari premium-cookie.json
         premium_cookies = load_premium_cookies()
-        if email not in premium_cookies: return send_msg(chat_id, "  Cookie tidak ditemukan")
-        del premium_cookies[email]
-        save_premium_cookies(premium_cookies)
-        send_msg(chat_id, f"  Cookie dihapus:\n{email}")
-    except:
-        send_msg(chat_id, "  Format:\n/delcookie email")                    
+        if email in premium_cookies:
+            del premium_cookies[email]
+            save_premium_cookies(premium_cookies)
+
+        # Hapus dari user_accounts (password-based) di users.json
+        users_d = load_users()
+        uid = str(user_id)
+        if uid in users_d:
+            before = users_d[uid].get("user_accounts", [])
+            users_d[uid]["user_accounts"] = [a for a in before if a.get("email") != email]
+            # Hapus juga dari emails list
+            if email in users_d[uid].get("emails", []):
+                users_d[uid]["emails"].remove(email)
+            save_users(users_d)
+
+        send_msg(chat_id, f"✅ Akun dihapus:\n<code>{email}</code>")
+    except Exception as e:
+        send_msg(chat_id, f"❌ Error: {e}")                    
         
 def check_limit(user_id):
     if user_id == OWNER_ID: return True
@@ -724,9 +747,9 @@ def handle_start(user_id, chat_id):
             "🛠️ <b>FITUR</b>\n"
             "<blockquote>"
             "/addcookie\n"
-            "/addemail\n"
+            "/addemail email password\n"
             "/listemail\n"
-            "/delcookie\n"
+            "/delcookie email\n"
             "/addnum  <i>(premium)</i>\n"
             "/delnumall\n"
             "/myrange\n"
@@ -751,9 +774,9 @@ def handle_start(user_id, chat_id):
             "🌟 <b>PREMIUM</b>\n"
             "<blockquote>"
             "/addcookie\n"
-            "/addemail\n"
+            "/addemail email password\n"
             "/listemail\n"
-            "/delcookie\n"
+            "/delcookie email\n"
             "/addnum  <i>(premium)</i>\n"
             "/delnumall\n"
             "/myrange\n"
@@ -776,9 +799,9 @@ def handle_start(user_id, chat_id):
             "🛠️ <b>FITUR</b> <i>(1 fitur = 1 token)</i>\n"
             "<blockquote>"
             "/addcookie\n"
-            "/addemail  <i>(max 1 akun — premium untuk lebih)</i>\n"
+            "/addemail email password  <i>(max 1 akun)</i>\n"
             "/listemail\n"
-            "/delcookie\n"
+            "/delcookie email\n"
             "/delnumall\n"
             "/myrange\n"
             "/ambilfile\n"
@@ -816,29 +839,57 @@ def code_to_flag(code):
     except: return "  "
         
 def add_email(text, chat_id, user_id, msg_id):
-    parts = text.split()
-    if len(parts) < 2: return send_msg(chat_id, "  Format:\n/addemail email@gmail.com")
-    email = parts[1].strip().lower()
-    if "@" not in email: return send_msg(chat_id, "  Email tidak valid!")
+    try:
+        parts = text.split()
+        if len(parts) < 3:
+            return send_msg(chat_id, "❌ Format:\n/addemail email@gmail.com password")
+        email    = parts[1].strip().lower()
+        password = parts[2].strip()
+        if "@" not in email:
+            return send_msg(chat_id, "❌ Email tidak valid!")
 
-    users = load_users()
-    user_data = users.get(str(user_id), {"emails": []})
-    current_count = len(user_data["emails"])
+        users     = load_users()
+        uid       = str(user_id)
+        user_data = users.get(uid, {"emails": []})
+        current_count = len(user_data.get("emails", []))
 
-    # Limit: free user max 1 email, premium max MAX_EMAIL
-    if not is_owner(user_id) and not is_premium(user_id) and current_count >= FREE_EMAIL_LIMIT:
-        return send_msg(chat_id,
-            f"❌ <b>Limit akun free: {FREE_EMAIL_LIMIT}</b>\n\n"
-            f"<blockquote>Upgrade Premium untuk menambah lebih dari {FREE_EMAIL_LIMIT} akun.\n"
-            f"📩 <a href='https://t.me/kicenxensai'>@kicenxensai</a></blockquote>"
-        )
-    if current_count >= MAX_EMAIL: return send_msg(chat_id, f"  Maksimal {MAX_EMAIL} email!")
-    if email in user_data["emails"]: return send_msg(chat_id, "  Email sudah ada!")
+        # Limit: free user max 1 email, premium max MAX_EMAIL
+        if not is_owner(user_id) and not is_premium(user_id) and current_count >= FREE_EMAIL_LIMIT:
+            return send_msg(chat_id,
+                f"❌ <b>Limit akun free: {FREE_EMAIL_LIMIT}</b>\n\n"
+                f"<blockquote>Upgrade Premium untuk menambah lebih dari {FREE_EMAIL_LIMIT} akun.\n"
+                f"📩 <a href='https://t.me/kicenxensai'>@kicenxensai</a></blockquote>"
+            )
+        if current_count >= MAX_EMAIL:
+            return send_msg(chat_id, f"❌ Maksimal {MAX_EMAIL} akun!")
+        if email in user_data.get("emails", []):
+            return send_msg(chat_id, "❌ Akun sudah ada!")
 
-    user_data["emails"].append(email)
-    users[str(user_id)] = user_data
-    save_users(users)
-    res = requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage", data={"chat_id": chat_id, "text": f"  Email ditambahkan:\n{email}"})
+        # Simpan email ke list & simpan password di user_accounts
+        user_data.setdefault("emails", []).append(email)
+        user_accs = [a for a in user_data.get("user_accounts", []) if a.get("email") != email]
+        user_accs.append({"email": email, "password": password})
+        user_data["user_accounts"] = user_accs
+        users[uid] = user_data
+        save_users(users)
+
+        # Coba login persis seperti add_account owner
+        acc = {
+            "email": email, "password": password,
+            "cookies": {}, "session": make_httpx_client(),
+            "last_login": 0, "csrf_token": ""
+        }
+        send_msg(chat_id, f"⏳ Mencoba login ke <code>{email}</code>...")
+        if login(acc):
+            acc["last_login"] = time.time()
+            send_msg(chat_id, f"✅ <b>Akun aktif &amp; login:</b>\n<code>{email}</code>")
+        else:
+            send_msg(chat_id,
+                f"⚠️ <b>Akun ditambahkan, tapi login gagal:</b>\n<code>{email}</code>\n\n"
+                f"<blockquote>Coba /addcookie untuk pasang cookie manual.</blockquote>"
+            )
+    except Exception as e:
+        send_msg(chat_id, f"❌ Error tambah akun: {e}")
 
 def list_email(chat_id, user_id):
     users = load_users()
@@ -2149,19 +2200,8 @@ def listen_command():
                         else: no_token_msg(chat_id)
                     
                     elif text.startswith("/addemail"):
-                        # Free user max 1 email — cek SEBELUM kurangi token
-                        uid_str = str(user_id)
-                        u_emails = load_users().get(uid_str, {}).get("emails", [])
-                        if not owner and not is_premium(user_id) and len(u_emails) >= FREE_EMAIL_LIMIT:
-                            send_msg(chat_id,
-                                f"❌ <b>Limit akun free: {FREE_EMAIL_LIMIT}</b>\n\n"
-                                f"<blockquote>Upgrade Premium untuk lebih dari {FREE_EMAIL_LIMIT} akun.\n"
-                                f"📩 <a href='https://t.me/kicenxensai'>@kicenxensai</a></blockquote>"
-                            )
-                        elif use_token(user_id):
-                            add_email(text, chat_id, user_id, msg_id)
-                        else:
-                            no_token_msg(chat_id)
+                        if use_token(user_id): add_email(text, chat_id, user_id, msg_id)
+                        else: no_token_msg(chat_id)
                     elif text.startswith("/listemail"): list_email(chat_id, user_id)
                     
                     elif text.startswith("/addgrup"):
@@ -2382,10 +2422,11 @@ def run_bot():
                         if em not in owner_emails:
                             new_email_to_uid[em] = uid_int
 
-                # Sync premium account sessions
+                # Sync premium account sessions (cookie-based + password-based user accounts)
                 prem_cookies = load_premium_cookies()
                 active_prem_emails = set()
                 for uid_str, udata in users_data.items():
+                    # --- Cookie-based (legacy / manual cookie) ---
                     for em in udata.get("emails", []):
                         if em in owner_emails or em not in prem_cookies:
                             continue
@@ -2406,6 +2447,24 @@ def run_bot():
                                 cached["session"].cookies.clear()
                                 cached["session"].cookies.update(prem_cookies[em])
                                 cached["last_login"] = 0
+
+                    # --- Password-based (via /addemail email password) ---
+                    for ua in udata.get("user_accounts", []):
+                        em  = ua.get("email", "")
+                        pwd = ua.get("password", "")
+                        if not em or not pwd or em in owner_emails:
+                            continue
+                        active_prem_emails.add(em)
+                        if em not in _premium_acc_cache:
+                            prem_acc = {
+                                "email": em, "password": pwd,
+                                "cookies": {}, "session": make_httpx_client(),
+                                "last_login": 0, "csrf_token": "",
+                            }
+                            _premium_acc_cache[em] = prem_acc
+                        else:
+                            # Update password jika berubah
+                            _premium_acc_cache[em]["password"] = pwd
 
                 for em in list(_premium_acc_cache.keys()):
                     if em not in active_prem_emails:
