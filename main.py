@@ -249,6 +249,68 @@ def get_or_create_user_key(user_id):
         save_users(users)
     return users[uid]["key"]
 
+# ================= TOKEN SYSTEM =================
+TOKEN_MAX = 20  # token per hari per user (reset jam 00:00 WIB)
+FREE_EMAIL_LIMIT = 1  # max email untuk non-premium
+
+def get_wib_date():
+    """Return tanggal hari ini dalam WIB (UTC+7)."""
+    from datetime import timezone, timedelta
+    tz_wib = timezone(timedelta(hours=7))
+    return datetime.now(tz_wib).strftime("%Y-%m-%d")
+
+def get_user_tokens(user_id):
+    """Ambil sisa token user hari ini. Auto-reset jika hari baru (WIB)."""
+    if user_id == OWNER_ID:
+        return TOKEN_MAX
+    uid = str(user_id)
+    users = load_users()
+    today = get_wib_date()
+    if uid not in users:
+        users[uid] = {"emails": [], "tokens": TOKEN_MAX, "last_token_reset": today}
+        save_users(users)
+        return TOKEN_MAX
+    u = users[uid]
+    if u.get("last_token_reset") != today:
+        u["tokens"] = TOKEN_MAX
+        u["last_token_reset"] = today
+        save_users(users)
+    return u.get("tokens", TOKEN_MAX)
+
+def use_token(user_id):
+    """Kurangi 1 token. Return True berhasil, False kalau habis. Owner unlimited."""
+    if user_id == OWNER_ID:
+        return True
+    uid = str(user_id)
+    users = load_users()
+    today = get_wib_date()
+    if uid not in users:
+        users[uid] = {"emails": [], "tokens": TOKEN_MAX, "last_token_reset": today}
+    u = users[uid]
+    if u.get("last_token_reset") != today:
+        u["tokens"] = TOKEN_MAX
+        u["last_token_reset"] = today
+    if u.get("tokens", 0) <= 0:
+        save_users(users)
+        return False
+    u["tokens"] = u.get("tokens", TOKEN_MAX) - 1
+    save_users(users)
+    return True
+
+def token_status_str(user_id):
+    """Return string singkat sisa token user untuk ditampilkan."""
+    if user_id == OWNER_ID:
+        return "♾️ Unlimited"
+    t = get_user_tokens(user_id)
+    return f"🎫 {t}/{TOKEN_MAX}"
+
+def no_token_msg(chat_id):
+    send_msg(chat_id,
+        "❌ <b>Token habis!</b>\n\n"
+        "<blockquote>Token kamu sudah habis hari ini.\n"
+        "Reset otomatis jam <b>00:00 WIB</b>.</blockquote>"
+    )
+
 # ===== PREMIUM ACCOUNT SESSION CACHE =====
 _premium_acc_cache = {}  # email -> acc dict (persistent session untuk premium user)
 
@@ -578,32 +640,52 @@ def send_msg(chat_id, text):
 def cek_premium(chat_id, user_id):
     my_groups = get_user_groups(user_id)
     grup_status = f"{len(my_groups)} grup" if my_groups else "Belum addgrup (PM aktif)"
+    tok = token_status_str(user_id)
+    users_d = load_users()
+    email_count = len(users_d.get(str(user_id), {}).get("emails", []))
+
     if user_id == OWNER_ID:
         return send_msg(chat_id,
-            f"  <b>STATUS PREMIUM</b>\n\n"
+            f"📊 <b>STATUS AKUN</b>\n\n"
             f"<blockquote>"
-            f"👑 Mode     : OWNER\n"
-            f"♾️ Akses    : Unlimited\n"
-            f"💬 Grup     : {grup_status}"
+            f"👑 Mode    : OWNER\n"
+            f"🎫 Token   : {tok}\n"
+            f"📧 Email   : {email_count} akun\n"
+            f"💬 Grup    : {grup_status}"
             f"</blockquote>"
         )
-    user = premium_users.get(str(user_id))
-    if not user: return send_msg(chat_id, "  Kamu bukan user premium")
-    if time.time() > user["expired"]:
+
+    prem_user = premium_users.get(str(user_id))
+    if prem_user and time.time() > prem_user["expired"]:
         del premium_users[str(user_id)]
         save_premium(premium_users)
-        return send_msg(chat_id, "  Premium kamu sudah expired")
-    reset_limit_if_needed(user_id)
-    sisa_detik = int(user["expired"] - time.time())
-    sisa_hari = max(0, sisa_detik // 86400)
+        prem_user = None
+
+    if prem_user:
+        reset_limit_if_needed(user_id)
+        sisa_hari = max(0, int((prem_user["expired"] - time.time()) // 86400))
+        user_key  = get_or_create_user_key(user_id)
+        return send_msg(chat_id,
+            f"📊 <b>STATUS AKUN</b>\n\n"
+            f"<blockquote>"
+            f"🌟 Mode    : PREMIUM\n"
+            f"🔑 Key     : <code>{user_key}</code>\n"
+            f"🎫 Token   : {tok}  <i>(reset 00:00 WIB)</i>\n"
+            f"📅 Sisa    : {sisa_hari} hari\n"
+            f"📧 Email   : {email_count} akun (max {MAX_EMAIL})\n"
+            f"💬 Grup    : {grup_status}"
+            f"</blockquote>"
+        )
+
+    # Free user
     send_msg(chat_id,
-        f"  <b>STATUS PREMIUM</b>\n\n"
+        f"📊 <b>STATUS AKUN</b>\n\n"
         f"<blockquote>"
-        f"🌟 Mode     : PREMIUM\n"
-        f"🔑 Key      : <code>{user_key}</code>\n"
-        f"📅 Sisa     : {sisa_hari} hari\n"
-        f"📊 Limit    : {user['used']}/{user['limit']} (reset harian)\n"
-        f"💬 Grup     : {grup_status}"
+        f"👤 Mode    : FREE\n"
+        f"🎫 Token   : {tok}  <i>(reset 00:00 WIB)</i>\n"
+        f"📧 Email   : {email_count}/{FREE_EMAIL_LIMIT} akun\n"
+        f"💬 Grup    : {grup_status}\n"
+        f"💎 Premium : max {MAX_EMAIL} akun + /addnum"
         f"</blockquote>"
     )
     
@@ -618,83 +700,99 @@ def reset_limit_if_needed(user_id):
 
 # ================= MENU & COMMANDS SYSTEM =================
 def handle_start(user_id, chat_id):
-    owner = is_owner(user_id)
+    owner  = is_owner(user_id)
     is_prem = is_premium(user_id)
     THUMBNAIL_PATH = "./thumbnail.png"
+    tok = token_status_str(user_id)
 
-    if owner or is_prem:
-        if owner:
-            caption = (
-                "🤖 <b>BOT OTP IVAS V7</b>\n"
-                "<i>SMS/OTP monitoring — Platform IVAS</i>\n\n"
-                "👑 <b>OWNER</b>\n"
-                "<blockquote>"
-                "/setcookie\n"
-                "/addakun\n"
-                "/delakun\n"
-                "/listakun\n"
-                "/addprem\n"
-                "/delprem\n"
-                "/listprem\n"
-                "/statsms"
-                "</blockquote>\n\n"
-                "🌟 <b>PREMIUM</b>\n"
-                "<blockquote>"
-                "/addcookie\n"
-                "/addemail\n"
-                "/listemail\n"
-                "/delcookie\n"
-                "/addnum\n"
-                "/delnumall\n"
-                "/myrange\n"
-                "/ambilfile\n"
-                "/cekivas\n"
-                "/cekprem"
-                "</blockquote>\n\n"
-                "💬 <b>GROUP</b>\n"
-                "<blockquote>"
-                "/addgrup\n"
-                "/delgrup\n"
-                "/listgrup"
-                "</blockquote>"
-            )
-        else:
-            user_key = get_or_create_user_key(user_id)
-            caption = (
-                "🤖 <b>BOT OTP IVAS V7</b>\n"
-                "<i>SMS/OTP monitoring — Platform IVAS</i>\n\n"
-                f"🔑 <b>KEY:</b> <code>{user_key}</code>\n\n"
-                "🌟 <b>PREMIUM</b>\n"
-                "<blockquote>"
-                "/addcookie\n"
-                "/addemail\n"
-                "/listemail\n"
-                "/delcookie\n"
-                "/addnum\n"
-                "/delnumall\n"
-                "/myrange\n"
-                "/ambilfile\n"
-                "/cekivas\n"
-                "/cekprem"
-                "</blockquote>\n\n"
-                "💬 <b>GROUP</b>\n"
-                "<blockquote>"
-                "/addgrup\n"
-                "/delgrup\n"
-                "/listgrup"
-                "</blockquote>"
-            )
+    if owner:
+        caption = (
+            "🤖 <b>BOT OTP IVAS V7</b>\n"
+            "<i>SMS/OTP monitoring — Platform IVAS</i>\n\n"
+            "👑 <b>OWNER</b>\n"
+            "<blockquote>"
+            "/setcookie\n"
+            "/addakun\n"
+            "/delakun\n"
+            "/listakun\n"
+            "/addprem\n"
+            "/delprem\n"
+            "/listprem\n"
+            "/statsms"
+            "</blockquote>\n\n"
+            f"🎫 <b>Token:</b> {tok}\n\n"
+            "🛠️ <b>FITUR</b>\n"
+            "<blockquote>"
+            "/addcookie\n"
+            "/addemail\n"
+            "/listemail\n"
+            "/delcookie\n"
+            "/addnum  <i>(premium)</i>\n"
+            "/delnumall\n"
+            "/myrange\n"
+            "/ambilfile\n"
+            "/cekivas\n"
+            "/cekprem"
+            "</blockquote>\n\n"
+            "💬 <b>GROUP</b>\n"
+            "<blockquote>"
+            "/addgrup\n"
+            "/delgrup\n"
+            "/listgrup"
+            "</blockquote>"
+        )
+    elif is_prem:
+        user_key = get_or_create_user_key(user_id)
+        caption = (
+            "🤖 <b>BOT OTP IVAS V7</b>\n"
+            "<i>SMS/OTP monitoring — Platform IVAS</i>\n\n"
+            f"🔑 <b>KEY:</b> <code>{user_key}</code>\n"
+            f"🎫 <b>Token:</b> {tok}\n\n"
+            "🌟 <b>PREMIUM</b>\n"
+            "<blockquote>"
+            "/addcookie\n"
+            "/addemail\n"
+            "/listemail\n"
+            "/delcookie\n"
+            "/addnum  <i>(premium)</i>\n"
+            "/delnumall\n"
+            "/myrange\n"
+            "/ambilfile\n"
+            "/cekivas\n"
+            "/cekprem"
+            "</blockquote>\n\n"
+            "💬 <b>GROUP</b>\n"
+            "<blockquote>"
+            "/addgrup\n"
+            "/delgrup\n"
+            "/listgrup"
+            "</blockquote>"
+        )
     else:
         caption = (
-            "🔒 <b>BOT OTP IVAS V7</b>\n\n"
-            "❌ <b>Akses Ditolak</b> — Kamu belum premium.\n\n"
-            "💎 <b>PRICELIST</b>\n"
+            "🤖 <b>BOT OTP IVAS V7</b>\n"
+            "<i>SMS/OTP monitoring — Platform IVAS</i>\n\n"
+            f"🎫 <b>Token:</b> {tok}  <i>(reset 00:00 WIB)</i>\n\n"
+            "🛠️ <b>FITUR</b> <i>(1 fitur = 1 token)</i>\n"
             "<blockquote>"
-            "🟢 <b>BASIC</b>  — 3 Hari / 20 Req  → Rp10.000\n"
-            "🔵 <b>PRO</b>    — 7 Hari / 50 Req  → Rp25.000\n"
-            "🟣 <b>SULTAN</b> — 30 Hari / 100 Req → Rp40.000"
+            "/addcookie\n"
+            "/addemail  <i>(max 1 akun — premium untuk lebih)</i>\n"
+            "/listemail\n"
+            "/delcookie\n"
+            "/delnumall\n"
+            "/myrange\n"
+            "/ambilfile\n"
+            "/cekivas\n"
+            "/cekprem"
             "</blockquote>\n\n"
-            "📩 @kicenxensai untuk beli akses."
+            "💬 <b>GROUP</b>\n"
+            "<blockquote>"
+            "/addgrup\n"
+            "/delgrup\n"
+            "/listgrup"
+            "</blockquote>\n\n"
+            "💎 <b>Upgrade Premium</b> → tambah lebih dari 1 akun &amp; /addnum\n"
+            f"📩 <a href='https://t.me/kicenxensai'>@kicenxensai</a>"
         )
 
     try:
@@ -725,7 +823,16 @@ def add_email(text, chat_id, user_id, msg_id):
 
     users = load_users()
     user_data = users.get(str(user_id), {"emails": []})
-    if len(user_data["emails"]) >= MAX_EMAIL: return send_msg(chat_id, f"  Maksimal {MAX_EMAIL} email!")
+    current_count = len(user_data["emails"])
+
+    # Limit: free user max 1 email, premium max MAX_EMAIL
+    if not is_owner(user_id) and not is_premium(user_id) and current_count >= FREE_EMAIL_LIMIT:
+        return send_msg(chat_id,
+            f"❌ <b>Limit akun free: {FREE_EMAIL_LIMIT}</b>\n\n"
+            f"<blockquote>Upgrade Premium untuk menambah lebih dari {FREE_EMAIL_LIMIT} akun.\n"
+            f"📩 <a href='https://t.me/kicenxensai'>@kicenxensai</a></blockquote>"
+        )
+    if current_count >= MAX_EMAIL: return send_msg(chat_id, f"  Maksimal {MAX_EMAIL} email!")
     if email in user_data["emails"]: return send_msg(chat_id, "  Email sudah ada!")
 
     user_data["emails"].append(email)
@@ -2014,30 +2121,47 @@ def listen_command():
                         if process_cookie_input(chat_id, user_id, text):
                             continue
 
-                    # ====== CEK PENDING ADDCOOKIE (premium input cookie JSON) ======
-                    if is_premium(user_id) and user_id in pending_addcookie and text and not text.startswith("/"):
+                    # ====== CEK PENDING ADDCOOKIE (semua user bisa, input cookie JSON) ======
+                    if user_id in pending_addcookie and text and not text.startswith("/"):
                         if process_addcookie_input(chat_id, user_id, text):
                             continue
 
                     # ====== CEK PENDING ADDNUM (premium/owner input target) ======
-                    if is_premium(user_id) and user_id in pending_addnum and text and not text.startswith("/"):
+                    if (owner or is_premium(user_id)) and user_id in pending_addnum and text and not text.startswith("/"):
                         if process_addnum_target(chat_id, user_id, text):
                             continue
 
                     # ROUTING COMMAND TEXT
                     if text == "/start": handle_start(user_id, chat_id)
-                    elif text.startswith("/cekivas"): cek_ivas(chat_id)
+                    elif text.startswith("/cekivas"):
+                        if use_token(user_id): cek_ivas(chat_id)
+                        else: no_token_msg(chat_id)
                     elif text.startswith("/cekprem"): cek_premium(chat_id, user_id)
                     
                     elif text.startswith("/listakun"): 
                         if owner: list_accounts(chat_id, user_id)
                         else: send_msg(chat_id, "  Khusus OWNER")
-                    elif text.startswith("/addcookie"): add_cookie_premium(text, chat_id, user_id)
-                    elif text.startswith("/delcookie"): del_cookie_premium(text, chat_id, user_id)
+                    elif text.startswith("/addcookie"):
+                        if use_token(user_id): add_cookie_premium(text, chat_id, user_id)
+                        else: no_token_msg(chat_id)
+                    elif text.startswith("/delcookie"):
+                        if use_token(user_id): del_cookie_premium(text, chat_id, user_id)
+                        else: no_token_msg(chat_id)
                     
-                    elif text.startswith("/addemail"): 
-                        if is_premium(user_id): add_email(text, chat_id, user_id, msg_id)
-                        else: send_msg(chat_id, "  Premium only")
+                    elif text.startswith("/addemail"):
+                        # Free user max 1 email — cek SEBELUM kurangi token
+                        uid_str = str(user_id)
+                        u_emails = load_users().get(uid_str, {}).get("emails", [])
+                        if not owner and not is_premium(user_id) and len(u_emails) >= FREE_EMAIL_LIMIT:
+                            send_msg(chat_id,
+                                f"❌ <b>Limit akun free: {FREE_EMAIL_LIMIT}</b>\n\n"
+                                f"<blockquote>Upgrade Premium untuk lebih dari {FREE_EMAIL_LIMIT} akun.\n"
+                                f"📩 <a href='https://t.me/kicenxensai'>@kicenxensai</a></blockquote>"
+                            )
+                        elif use_token(user_id):
+                            add_email(text, chat_id, user_id, msg_id)
+                        else:
+                            no_token_msg(chat_id)
                     elif text.startswith("/listemail"): list_email(chat_id, user_id)
                     
                     elif text.startswith("/addgrup"):
@@ -2045,16 +2169,20 @@ def listen_command():
                             gid = str(chat_id)
                             if gid in get_user_groups(user_id):
                                 send_msg(chat_id, "  Grup sudah ada di akun kamu")
-                            else:
+                            elif use_token(user_id):
                                 add_user_group(user_id, gid)
                                 send_msg(chat_id, f"✅ <b>Grup berhasil ditambahkan!</b>\n\n<blockquote>🆔 ID: <code>{gid}</code>\n🔑 Key: <code>{get_or_create_user_key(user_id)}</code></blockquote>")
+                            else:
+                                no_token_msg(chat_id)
                         else: send_msg(chat_id, "  Jalankan di dalam grup!")
 
                     elif text.startswith("/delgrup"):
-                        gid = str(chat_id)
-                        if remove_user_group(user_id, gid):
-                            send_msg(chat_id, f"  Grup dihapus dari akun kamu:\n{gid}")
-                        else: send_msg(chat_id, "  Grup tidak ditemukan di akun kamu")
+                        if use_token(user_id):
+                            gid = str(chat_id)
+                            if remove_user_group(user_id, gid):
+                                send_msg(chat_id, f"  Grup dihapus dari akun kamu:\n{gid}")
+                            else: send_msg(chat_id, "  Grup tidak ditemukan di akun kamu")
+                        else: no_token_msg(chat_id)
 
                     elif text.startswith("/listgrup"):
                         my_groups = get_user_groups(user_id)
@@ -2065,20 +2193,24 @@ def listen_command():
                             send_msg(chat_id, msg_out)
 
                     elif text.startswith("/addnum"): 
-                        if is_premium(user_id): command_addnum(text, chat_id, user_id)
-                        else: send_msg(chat_id, "❌ Premium only")
+                        if owner or is_premium(user_id): command_addnum(text, chat_id, user_id)
+                        else: send_msg(chat_id,
+                            "❌ <b>/addnum wajib Premium</b>\n\n"
+                            "<blockquote>Fitur tambah range/nomor memerlukan akun Premium.\n"
+                            f"📩 <a href='https://t.me/kicenxensai'>@kicenxensai</a></blockquote>"
+                        )
                         
                     elif text.startswith("/ambilfile"):
-                        if is_premium(user_id): command_ambilfile(text, chat_id, user_id)
-                        else: send_msg(chat_id, "❌ Premium only")
+                        if use_token(user_id): command_ambilfile(text, chat_id, user_id)
+                        else: no_token_msg(chat_id)
 
-                    elif text.startswith("/delnumall"): 
-                        if is_premium(user_id): command_delnumall(text, chat_id, user_id)
-                        else: send_msg(chat_id, "❌ Premium only")
+                    elif text.startswith("/delnumall"):
+                        if use_token(user_id): command_delnumall(text, chat_id, user_id)
+                        else: no_token_msg(chat_id)
 
                     elif text.startswith("/myrange"):
-                        if is_premium(user_id): command_myrange(text, chat_id, user_id)
-                        else: send_msg(chat_id, "❌ Premium only")
+                        if use_token(user_id): command_myrange(text, chat_id, user_id)
+                        else: no_token_msg(chat_id)
                     
                     elif text.startswith("/addprem"): 
                         if owner: add_premium(text, chat_id) 
