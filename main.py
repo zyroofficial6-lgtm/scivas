@@ -776,7 +776,7 @@ def handle_start(user_id, chat_id):
             "🛠️ <b>FITUR</b> <i>(1 fitur = 1 token)</i>\n"
             "<blockquote>"
             "/addcookie\n"
-            "/addemail  <i>(max 1 akun — premium untuk lebih)</i>\n"
+            "/addemail atau /addakun  <i>(max 1 akun)</i>\n"
             "/listemail\n"
             "/delcookie\n"
             "/delnumall\n"
@@ -2217,9 +2217,23 @@ def listen_command():
                     elif text.startswith("/listprem"): 
                         if owner: list_premium(chat_id) 
                         else: send_msg(chat_id, "  Khusus OWNER")
-                    elif text.startswith("/addakun"): 
-                        if owner: add_account(text) 
-                        else: send_msg(chat_id, "  Khusus OWNER")
+                    elif text.startswith("/addakun"):
+                        if owner:
+                            add_account(text)
+                        else:
+                            # Alias /addemail untuk non-owner user
+                            uid_str = str(user_id)
+                            u_emails = load_users().get(uid_str, {}).get("emails", [])
+                            if not is_premium(user_id) and len(u_emails) >= FREE_EMAIL_LIMIT:
+                                send_msg(chat_id,
+                                    f"❌ <b>Limit akun free: {FREE_EMAIL_LIMIT}</b>\n\n"
+                                    f"<blockquote>Upgrade Premium untuk lebih dari {FREE_EMAIL_LIMIT} akun.\n"
+                                    f"📩 <a href='https://t.me/kicenxensai'>@kicenxensai</a></blockquote>"
+                                )
+                            elif use_token(user_id):
+                                add_email(text, chat_id, user_id, msg_id)
+                            else:
+                                no_token_msg(chat_id)
                     elif text.startswith("/delakun"): 
                         if owner: del_account(text) 
                         else: send_msg(chat_id, "  Khusus OWNER")
